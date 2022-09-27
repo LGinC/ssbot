@@ -34,5 +34,5 @@ filter.json里增加对！！的过滤  \uFF01就是！的unicode
     }
 }
 ```
-
+同时记得把setu目录映射到cqhttp的/data/data/images下，因为cqhttp只能发送这个目录(可以有子目录)下的图片
 然后重启cqhttp服务，就可以愉快地涩涩了
