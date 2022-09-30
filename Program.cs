@@ -1,4 +1,6 @@
 using hyjiacan.py4n;
+using Microsoft.Extensions.Caching.Memory;
+using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -9,6 +11,7 @@ builder.Configuration.AddEnvironmentVariables();
 // Add services to the container.
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddMemoryCache();
 builder.Services.AddSwaggerGen();
 builder.Services.AddHttpClient(ClientName, options => options.BaseAddress = new Uri(builder.Configuration["Cqhttp:Host"]));
 var secret = builder.Configuration["Cqhttp:secret"];
@@ -23,7 +26,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory) =>
+app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory, IMemoryCache cache) =>
 {
     JsonSerializerOptions serializerOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     string body;
@@ -37,7 +40,7 @@ app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory) =>
     {
         "message" => JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, serializerOptions)!.Message_type switch
         {
-            "group" => await GroupMessage(JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, serializerOptions)!, factory.CreateClient(ClientName)),
+            "group" => await GroupMessage(JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, serializerOptions)!, factory.CreateClient(ClientName), cache),
             "private" => string.Empty,//JsonSerializer.Deserialize< CqhttpGroupMsgRequest >(body,serializerOptions),
             _ => string.Empty,
         },
@@ -51,29 +54,29 @@ app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory) =>
 
 app.Run();
 
-async Task<string> GroupMessage(CqhttpGroupMsgRequest request, HttpClient client)
+async Task<string> GroupMessage(CqhttpGroupMsgRequest request, HttpClient client, IMemoryCache cache)
 {   
     var msg = request.Message;
     if (string.IsNullOrWhiteSpace(msg)) return string.Empty;
     if (!msg.StartsWith("!!") && !msg.StartsWith("！！")) return string.Empty;
     var cmd = msg[2..];
+    var cmdType = CommandType.None;
     var isHanzi = PinyinUtil.IsHanzi(cmd[0]);
     if (!isHanzi && cmd == "setu")
     {
-        //发送涩图
-        await SendMsg(client, $"/send_group_msg?access_token={secret}", new
-        {
-            group_id = request.Group_id,
-            message = $"[CQ:image,file={GetRandomPic()}]",
-        });
-        return cmd;
+        cmdType = CommandType.SexPicture;
     }
-    else if (!isHanzi) return string.Empty;
-    switch (Pinyin4Net.GetPinyin(cmd[..2], PinyinFormat.LOWERCASE))
+    var pinyinOfCmd = Pinyin4Net.GetPinyin(cmd[..], PinyinFormat.LOWERCASE);
+    if(pinyinOfCmd.Contains("se4 tu2") || pinyinOfCmd.Contains("bu4 gou4 se4"))//涩图 或 不够涩
     {
-        case "se4 tu2":
+        cmdType = CommandType.SexPicture;
+    }
+
+    switch (cmdType)
+    {
+        case CommandType.SexPicture:
             //发送涩图
-            var img = GetRandomPic();
+            var img = GetRandomPic(cache);
             if (img == default) return cmd;
             await SendMsg(client, $"/send_group_msg?access_token={secret}", new
             {
@@ -88,21 +91,38 @@ async Task<string> GroupMessage(CqhttpGroupMsgRequest request, HttpClient client
 }
 
 const string imagePath = "images";
-string GetRandomPic()
+const string setuCacheKey = "setu";
+string GetRandomPic(IMemoryCache cache)
 {
     var p = Path.GetFullPath(imagePath);
-    var setuPath = Path.Combine(p, "setu");
-    if (!Directory.Exists(setuPath))
+    var files = cache.GetOrCreate(setuCacheKey, s =>
     {
-        Directory.CreateDirectory(setuPath);
-    }
-    var files = Directory.GetFiles(setuPath);
-    if(files.Length == 0)
+        var setuPath = Path.Combine(p, "setu");
+        if (!Directory.Exists(setuPath))
+        {
+            Directory.CreateDirectory(setuPath);
+        }
+        return Directory.GetFiles(setuPath).ToList();
+    });
+    
+    if(files.Count == 0)
     {
-        Console.WriteLine($"{setuPath} 下没有任务图片哦");
+        Console.WriteLine($"{Path.Combine(Path.GetFullPath(imagePath), "setu")} 下没有任何图片哦");
+        cache.Remove(setuCacheKey);
         return string.Empty;
     }
-    return files[RandomNumberGenerator.GetInt32(0, files.Length)][p.Length..];
+    var index = RandomNumberGenerator.GetInt32(0, files.Count);
+    var result = files[index][p.Length..];
+    files.RemoveAt(index);
+    if(files.Count > 0)
+    {
+        cache.Set(setuCacheKey, files);
+    }
+    else
+    {
+        cache.Remove(setuCacheKey);
+    }
+    return result;
 }
 
 async Task<bool> SendMsg(HttpClient client, string url, object body)
@@ -116,6 +136,20 @@ async Task<bool> SendMsg(HttpClient client, string url, object body)
     return true;
 }
 
+/// <summary>
+/// 命令类型
+/// </summary>
+public enum CommandType
+{
+    /// <summary>
+    /// 无
+    /// </summary>
+    None,
+    /// <summary>
+    /// 涩图
+    /// </summary>
+    SexPicture,
+}
 
 /// <summary>
 /// go-cqhttp请求
