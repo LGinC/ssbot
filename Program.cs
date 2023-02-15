@@ -1,11 +1,13 @@
 using hyjiacan.py4n;
 using Microsoft.Extensions.Caching.Memory;
-using System.Runtime.Intrinsics.X86;
 using System.Security.Cryptography;
 using System.Text.Json;
+using ssbot.Models.ChatGPT;
+using System.Net;
 
 const string ClientName = "go-cqhttp";
-
+const string ChatGPTClientName = "ChatGPT";
+const string ChatGPTCachePrefix = "chatGPT";
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddEnvironmentVariables();
 // Add services to the container.
@@ -13,10 +15,17 @@ builder.Configuration.AddEnvironmentVariables();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddMemoryCache();
 builder.Services.AddSwaggerGen();
-builder.Services.AddHttpClient(ClientName, options => options.BaseAddress = new Uri(builder.Configuration["Cqhttp:Host"]));
+builder.Services.AddHttpClient(ClientName, options => options.BaseAddress = new Uri(builder.Configuration["Cqhttp:Host"] ?? string.Empty));
+builder.Services.AddHttpClient(ChatGPTClientName, options =>
+{
+    options.BaseAddress = new Uri(builder.Configuration["ChatGPT:Host"]?? string.Empty);
+    options.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
+    options.DefaultRequestHeaders.Add("Authorization", $"Bearer {builder.Configuration["ChatGPT:ApiKey"]}");
+}).ConfigurePrimaryHttpMessageHandler(services => new HttpClientHandler { Proxy = string.IsNullOrWhiteSpace(builder.Configuration["ChatGPT:Proxy"]) ? null : new WebProxy(), ServerCertificateCustomValidationCallback = (m,c2,c,e)=> true });
 var secret = builder.Configuration["Cqhttp:secret"];
+var filterKeywords = builder.Configuration["Cqhttp:filter"]?.Split(',');
 builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
-
+JsonSerializerOptions serializerOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -28,7 +37,6 @@ if (app.Environment.IsDevelopment())
 
 app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory, IMemoryCache cache) =>
 {
-    JsonSerializerOptions serializerOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
     string body;
     using (StreamReader reader = new(request.Body))
     {
@@ -40,7 +48,7 @@ app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory, IMe
     {
         "message" => JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, serializerOptions)!.Message_type switch
         {
-            "group" => await GroupMessage(JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, serializerOptions)!, factory.CreateClient(ClientName), cache),
+            "group" => await GroupMessage(JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, serializerOptions)!, factory, cache),
             "private" => string.Empty,//JsonSerializer.Deserialize< CqhttpGroupMsgRequest >(body,serializerOptions),
             _ => string.Empty,
         },
@@ -54,37 +62,63 @@ app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory, IMe
 
 app.Run();
 
-async Task<string> GroupMessage(CqhttpGroupMsgRequest request, HttpClient client, IMemoryCache cache)
+async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactory factory, IMemoryCache cache)
 {   
     var msg = request.Message;
     if (string.IsNullOrWhiteSpace(msg)) return string.Empty;
-    if (!msg.StartsWith("!!") && !msg.StartsWith("£¡£¡")) return string.Empty;
+    if (!msg.StartsWith("!!") && !msg.StartsWith("ï¼ï¼")) return string.Empty;
     var cmd = msg[2..];
+    if (filterKeywords is { Length: > 0 } && filterKeywords.Contains(cmd))
+        return cmd;
     var cmdType = CommandType.None;
     var isHanzi = PinyinUtil.IsHanzi(cmd[0]);
     if (!isHanzi && cmd == "setu")
     {
         cmdType = CommandType.SexPicture;
     }
-    var pinyinOfCmd = Pinyin4Net.GetPinyin(cmd[..], PinyinFormat.LOWERCASE);
-    if(pinyinOfCmd.Contains("se4 tu2") || pinyinOfCmd.Contains("bu4 gou4 se4"))//É¬Í¼ »ò ²»¹»É¬
+    var pinyinOfCmd = Pinyin4Net.GetPinyin(cmd, PinyinFormat.LOWERCASE);
+    if(pinyinOfCmd.Contains("se4 tu2") || pinyinOfCmd.Contains("bu4 gou4 se4"))//æ¶©å›¾ æˆ– ä¸å¤Ÿæ¶©
     {
         cmdType = CommandType.SexPicture;
     }
-
+    var qqClient = factory.CreateClient(ClientName);
     switch (cmdType)
     {
         case CommandType.SexPicture:
-            //·¢ËÍÉ¬Í¼
-            var img = GetRandomPic(cache);
-            if (img == default) return cmd;
-            await SendMsg(client, $"/send_group_msg?access_token={secret}", new
+            //å‘é€æ¶©å›¾
+            var img = GetRandomPic(cache, request.Group_id.ToString());
+            await SendMsg(qqClient, $"/send_group_msg?access_token={secret}", new
             {
                 group_id = request.Group_id,
                 message = $"[CQ:image,file={img}]",
             });
             break;
-        default:
+        default://å‘é€è¯·æ±‚åˆ°chatGPT
+            var cacheKey = $"{ChatGPTCachePrefix}_{request.User_id}";
+            if (cmd == "quitGPT")
+            {
+                cache.Remove(cacheKey);
+                break;
+            }
+
+            var history = cache.Get<List<string>>(cacheKey) ?? new List<string>();
+            var question = $"{string.Join(' ', history)}\nHuman: {cmd}";
+            var httpClient = factory.CreateClient(ChatGPTClientName);
+            string? returnMsg;
+            do
+            {
+                var response = await GetCompletion(httpClient, question);
+                returnMsg = response!.Error != null ? response.Error.Message : response!.Choices?.FirstOrDefault()?.Text;
+            } while (returnMsg == "broken");//æ— ç»“æœåˆ™ç»§ç»­æäº¤ ç›´åˆ°æœ‰ç»“æœä¸ºæ­¢
+            _ = await SendMsg(qqClient, $"/send_group_msg?access_token={secret}", new
+            {
+                group_id = request.Group_id,
+                message = returnMsg?.TrimStart(),
+                auto_escape = true,
+            });
+            history.Add($"{cmd}{returnMsg}");
+            if(history.Count>10) history.RemoveAt(0);
+            cache.Set(cacheKey, history);
             break;
     }
     return cmd;
@@ -92,10 +126,11 @@ async Task<string> GroupMessage(CqhttpGroupMsgRequest request, HttpClient client
 
 const string imagePath = "images";
 const string setuCacheKey = "setu";
-string GetRandomPic(IMemoryCache cache)
+string GetRandomPic(IMemoryCache cache, string postfix)
 {
     var p = Path.GetFullPath(imagePath);
-    var files = cache.GetOrCreate(setuCacheKey, s =>
+    var cacheKey = $"{setuCacheKey}_{postfix}";
+    var files = cache.GetOrCreate(cacheKey, s =>
     {
         var setuPath = Path.Combine(p, "setu");
         if (!Directory.Exists(setuPath))
@@ -105,10 +140,10 @@ string GetRandomPic(IMemoryCache cache)
         return Directory.GetFiles(setuPath).ToList();
     });
     
-    if(files.Count == 0)
+    if(files is null or { Count: 0 })
     {
-        Console.WriteLine($"{Path.Combine(Path.GetFullPath(imagePath), "setu")} ÏÂÃ»ÓĞÈÎºÎÍ¼Æ¬Å¶");
-        cache.Remove(setuCacheKey);
+        Console.WriteLine($"{Path.Combine(Path.GetFullPath(imagePath), "setu")} ä¸‹æ²¡æœ‰ä»»ä½•å›¾ç‰‡å“¦");
+        cache.Remove(cacheKey);
         return string.Empty;
     }
     var index = RandomNumberGenerator.GetInt32(0, files.Count);
@@ -116,11 +151,11 @@ string GetRandomPic(IMemoryCache cache)
     files.RemoveAt(index);
     if(files.Count > 0)
     {
-        cache.Set(setuCacheKey, files);
+        cache.Set(cacheKey, files);
     }
     else
     {
-        cache.Remove(setuCacheKey);
+        cache.Remove(cacheKey);
     }
     return result;
 }
@@ -128,181 +163,184 @@ string GetRandomPic(IMemoryCache cache)
 async Task<bool> SendMsg(HttpClient client, string url, object body)
 {
     var r = await client.PostAsJsonAsync(url, body);
-    if (!r.IsSuccessStatusCode)
-    {
-        Console.WriteLine($"·µ»Ø½á¹û: {await r.Content.ReadAsStringAsync()}");
-        return false;
-    }
-    return true;
+    if (r.IsSuccessStatusCode) return true;
+    Console.WriteLine($"è¿”å›ç»“æœ: {await r.Content.ReadAsStringAsync()}");
+    return false;
+}
+
+async Task<Response?> GetCompletion(HttpClient client, string prompt)
+{
+    var r = await client.PostAsJsonAsync("/v1/completions", new Request { Prompt = prompt });
+    return await r.Content.ReadFromJsonAsync<Response>(serializerOptions);
 }
 
 /// <summary>
-/// ÃüÁîÀàĞÍ
+/// å‘½ä»¤ç±»å‹
 /// </summary>
 public enum CommandType
 {
     /// <summary>
-    /// ÎŞ
+    /// æ— 
     /// </summary>
     None,
     /// <summary>
-    /// É¬Í¼
+    /// æ¶©å›¾
     /// </summary>
     SexPicture,
 }
 
 /// <summary>
-/// go-cqhttpÇëÇó
+/// go-cqhttpè¯·æ±‚
 /// </summary>
 public class CqhttpBaseRequest
 {
     /// <summary>
-    /// Ê±¼ä´Á
+    /// æ—¶é—´æˆ³
     /// </summary>
     public long Time { get; set; }
     /// <summary>
-    /// ÊÕµ½ÊÂ¼şµÄ»úÆ÷ÈË QQ ºÅ
+    /// æ”¶åˆ°äº‹ä»¶çš„æœºå™¨äºº QQ å·
     /// </summary>
     public long Self_id { get; set; }
     /// <summary>
-    /// ÉÏ±¨ÀàĞÍ 
-    /// <list>message	ÏûÏ¢, ÀıÈç, ÈºÁÄÏûÏ¢</list>
-    /// <list>request	ÇëÇó, ÀıÈç, ºÃÓÑÉêÇë</list>
-    /// <list>notice	Í¨Öª, ÀıÈç, Èº³ÉÔ±Ôö¼Ó</list>
-    /// <list>meta_event	ÔªÊÂ¼ş, ÀıÈç, go-cqhttp ĞÄÌø°ü</list>
+    /// ä¸ŠæŠ¥ç±»å‹ 
+    /// <list>message	æ¶ˆæ¯, ä¾‹å¦‚, ç¾¤èŠæ¶ˆæ¯</list>
+    /// <list>request	è¯·æ±‚, ä¾‹å¦‚, å¥½å‹ç”³è¯·</list>
+    /// <list>notice	é€šçŸ¥, ä¾‹å¦‚, ç¾¤æˆå‘˜å¢åŠ </list>
+    /// <list>meta_event	å…ƒäº‹ä»¶, ä¾‹å¦‚, go-cqhttp å¿ƒè·³åŒ…</list>
     /// </summary>
     public string? Post_type { get; set; }
 }
 
 /// <summary>
-/// ÁÄÌìÏûÏ¢ÇëÇó
+/// èŠå¤©æ¶ˆæ¯è¯·æ±‚
 /// </summary>
 public class CqhttpMsgRequest : CqhttpBaseRequest
 {
     /// <summary>
-    /// ÏûÏ¢ÀàĞÍ
-    /// <list>private Ë½ÁÄ</list>
-    /// <list>group ÈºÏûÏ¢</list>
+    /// æ¶ˆæ¯ç±»å‹
+    /// <list>private ç§èŠ</list>
+    /// <list>group ç¾¤æ¶ˆæ¯</list>
     /// </summary>
     public string? Message_type { get; set; }
     /// <summary>
-    /// ÏûÏ¢×ÓÀàĞÍ
-    /// <list>friend ºÃÓÑ</list>
-    /// <list>group ÈºÁÙÊ±»á»°</list>
-    /// <list>group_self ÈºÖĞ×ÔÉí·¢ËÍ</list>
-    /// <list>normal Õı³£ÈºÁÄÏûÏ¢</list>
-    /// <list>anonymous ÄäÃûÏûÏ¢</list>
-    /// <list>notice ÏµÍ³ÌáÊ¾  Èç¡¸¹ÜÀíÔ±ÒÑ½ûÖ¹ÈºÄÚÄäÃûÁÄÌì¡¹</list>
+    /// æ¶ˆæ¯å­ç±»å‹
+    /// <list>friend å¥½å‹</list>
+    /// <list>group ç¾¤ä¸´æ—¶ä¼šè¯</list>
+    /// <list>group_self ç¾¤ä¸­è‡ªèº«å‘é€</list>
+    /// <list>normal æ­£å¸¸ç¾¤èŠæ¶ˆæ¯</list>
+    /// <list>anonymous åŒ¿åæ¶ˆæ¯</list>
+    /// <list>notice ç³»ç»Ÿæç¤º  å¦‚ã€Œç®¡ç†å‘˜å·²ç¦æ­¢ç¾¤å†…åŒ¿åèŠå¤©ã€</list>
     /// </summary>
     public string? Sub_type { get; set; }
     /// <summary>
-    /// ÏûÏ¢ ID
+    /// æ¶ˆæ¯ ID
     /// </summary>
     public int Message_id { get; set; }
     /// <summary>
-    /// ·¢ËÍÕß QQ ºÅ
+    /// å‘é€è€… QQ å·
     /// </summary>
     public long User_id { get; set; }
     /// <summary>
-    /// ÏûÏ¢ÄÚÈİ
+    /// æ¶ˆæ¯å†…å®¹
     /// </summary>
     public string? Message { get; set; }
     /// <summary>
-    /// Ô­Ê¼ÏûÏ¢ÄÚÈİ
+    /// åŸå§‹æ¶ˆæ¯å†…å®¹
     /// </summary>
     public string? Raw_message { get; set; }
     /// <summary>
-    /// ×ÖÌå
+    /// å­—ä½“
     /// </summary>
     public int Font { get; set; }
 }
 
 /// <summary>
-/// Ë½ÁÄÏûÏ¢
+/// ç§èŠæ¶ˆæ¯
 /// </summary>
 public class CqhttpPrivateMsgRequest : CqhttpMsgRequest
 {
     /// <summary>
-    /// ·¢ËÍÈËĞÅÏ¢
+    /// å‘é€äººä¿¡æ¯
     /// </summary>
     public CqhttpPrivateMsgSender? Sender { get; set; }
 
     /// <summary>
-    /// ÁÙÊ±»á»°À´Ô´
+    /// ä¸´æ—¶ä¼šè¯æ¥æº
     /// </summary>
     public int? Temp_source { get; set; }
 
 }
 
 /// <summary>
-/// ÈºÏûÏ¢ÇëÇó
+/// ç¾¤æ¶ˆæ¯è¯·æ±‚
 /// </summary>
 public class CqhttpGroupMsgRequest : CqhttpMsgRequest
 {
     /// <summary>
-    /// ÈººÅ
+    /// ç¾¤å·
     /// </summary>
     public int Group_id { get; set; }
 
     /// <summary>
-    /// ·¢ËÍÈËĞÅÏ¢
+    /// å‘é€äººä¿¡æ¯
     /// </summary>
     public CqhttpGroupMsgSender? Sender { get; set; }
 }
 
 /// <summary>
-/// Ë½ÁÄÏûÏ¢·¢ËÍÕßĞÅÏ¢
+/// ç§èŠæ¶ˆæ¯å‘é€è€…ä¿¡æ¯
 /// </summary>
 public class CqhttpPrivateMsgSender
 {
     /// <summary>
-    /// ÄêÁä
+    /// å¹´é¾„
     /// </summary>
     public int Age { get; set; }
     /// <summary>
-    /// ĞÔ±ğ
+    /// æ€§åˆ«
     /// </summary>
     public string? Sex { get; set; }
     /// <summary>
-    /// êÇ³Æ
+    /// æ˜µç§°
     /// </summary>
     public string? Nickname { get; set; }
     /// <summary>
-    /// ·¢ËÍÕßid
+    /// å‘é€è€…id
     /// </summary>
     public long User_id { get; set; }
     /// <summary>
-    /// ·¢ËÍÈËĞÅÏ¢
+    /// å‘é€äººä¿¡æ¯
     /// </summary>
     public CqhttpPrivateMsgSender? Sender { get; set; }
 }
 
 /// <summary>
-/// ÈºÁÄÏûÏ¢·¢ËÍÕßĞÅÏ¢
+/// ç¾¤èŠæ¶ˆæ¯å‘é€è€…ä¿¡æ¯
 /// </summary>
 public class CqhttpGroupMsgSender : CqhttpPrivateMsgSender
 {
     /// <summary>
-    /// ÈºÃûÆ¬£¯±¸×¢
+    /// ç¾¤åç‰‡ï¼å¤‡æ³¨
     /// </summary>
     public string? Card { get; set; }
     /// <summary>
-    /// µØÇø
+    /// åœ°åŒº
     /// </summary>
     public string? Area { get; set; }
     /// <summary>
-    /// ³ÉÔ±µÈ¼¶
+    /// æˆå‘˜ç­‰çº§
     /// </summary>
     public string? Level { get; set; }
     /// <summary>
-    /// ½ÇÉ«
-    /// <list>owner ÈºÖ÷</list>
-    /// <list>admin ¹ÜÀíÔ±</list>
-    /// <list>member ³ÉÔ±</list>
+    /// è§’è‰²
+    /// <list>owner ç¾¤ä¸»</list>
+    /// <list>admin ç®¡ç†å‘˜</list>
+    /// <list>member æˆå‘˜</list>
     /// </summary>
     public string? Role { get; set; }
     /// <summary>
-    /// ×¨ÊôÍ·ÏÎ
+    /// ä¸“å±å¤´è¡”
     /// </summary>
     public string? Title { get; set; }
 }
