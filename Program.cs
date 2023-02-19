@@ -1,31 +1,36 @@
 using hyjiacan.py4n;
-using Microsoft.Extensions.Caching.Memory;
 using System.Security.Cryptography;
 using System.Text.Json;
 using ssbot.Models.ChatGPT;
 using System.Net;
+using Microsoft.Extensions.Caching.Distributed;
+using ssbot;
 
-const string ClientName = "go-cqhttp";
-const string ChatGPTClientName = "ChatGPT";
-const string ChatGPTCachePrefix = "chatGPT";
+const string clientName = "go-cqhttp";
+const string chatGptClientName = "ChatGPT";
+const string chatGptCachePrefix = "chatGPT";
 var builder = WebApplication.CreateBuilder(args);
 builder.Configuration.AddEnvironmentVariables();
 // Add services to the container.
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddMemoryCache();
+// builder.Services.AddMemoryCache();
 builder.Services.AddSwaggerGen();
-builder.Services.AddHttpClient(ClientName, options => options.BaseAddress = new Uri(builder.Configuration["Cqhttp:Host"] ?? string.Empty));
-builder.Services.AddHttpClient(ChatGPTClientName, options =>
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = builder.Configuration.GetConnectionString("redis");
+    options.InstanceName = "ssbot";
+});
+builder.Services.AddHttpClient(clientName, options => options.BaseAddress = new Uri(builder.Configuration["Cqhttp:Host"] ?? string.Empty));
+builder.Services.AddHttpClient(chatGptClientName, options =>
 {
     options.BaseAddress = new Uri(builder.Configuration["ChatGPT:Host"]?? string.Empty);
     options.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
     options.DefaultRequestHeaders.Add("Authorization", $"Bearer {builder.Configuration["ChatGPT:ApiKey"]}");
-}).ConfigurePrimaryHttpMessageHandler(services => new HttpClientHandler { Proxy = string.IsNullOrWhiteSpace(builder.Configuration["ChatGPT:Proxy"]) ? null : new WebProxy(), ServerCertificateCustomValidationCallback = (m,c2,c,e)=> true });
+}).ConfigurePrimaryHttpMessageHandler(_ => new HttpClientHandler { Proxy = string.IsNullOrWhiteSpace(builder.Configuration["ChatGPT:Proxy"]) ? null : new WebProxy(), ServerCertificateCustomValidationCallback = (_,_,_,_)=> true });
 var secret = builder.Configuration["Cqhttp:secret"];
 var filterKeywords = builder.Configuration["Cqhttp:filter"]?.Split(',');
 builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
-JsonSerializerOptions serializerOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 var app = builder.Build();
 
 // Configure the HTTP request pipeline.
@@ -35,21 +40,21 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory, IMemoryCache cache) =>
+app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory, IDistributedCache cache) =>
 {
     string body;
     using (StreamReader reader = new(request.Body))
     {
         body = await reader.ReadToEndAsync();
     }
-    var baseRequest = JsonSerializer.Deserialize<CqhttpBaseRequest>(body, serializerOptions)!;
+    var baseRequest = JsonSerializer.Deserialize<CqhttpBaseRequest>(body, RedisExtension.JsonSerializerOptions)!;
     if (baseRequest.Post_type != "message") return string.Empty;
     return baseRequest.Post_type switch
     {
-        "message" => JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, serializerOptions)!.Message_type switch
+        "message" => JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, RedisExtension.JsonSerializerOptions)!.Message_type switch
         {
-            "group" => await GroupMessage(JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, serializerOptions)!, factory, cache),
-            "private" => string.Empty,//JsonSerializer.Deserialize< CqhttpGroupMsgRequest >(body,serializerOptions),
+            "group" => await GroupMessage(JsonSerializer.Deserialize<CqhttpGroupMsgRequest>(body, RedisExtension.JsonSerializerOptions)!, factory, cache),
+            "private" => string.Empty,//JsonSerializer.Deserialize< CqhttpGroupMsgRequest >(body,RedisExtension.JsonSerializerOptions),
             _ => string.Empty,
         },
         "request" => string.Empty,
@@ -58,11 +63,11 @@ app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory, IMe
         _ => string.Empty,
     };
 })
-.WithName("ReceveCommand");
+.WithName("ReceiveCommand");
 
 app.Run();
 
-async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactory factory, IMemoryCache cache)
+async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactory factory, IDistributedCache cache)
 {   
     var msg = request.Message;
     if (string.IsNullOrWhiteSpace(msg)) return string.Empty;
@@ -81,12 +86,12 @@ async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactor
     {
         cmdType = CommandType.SexPicture;
     }
-    var qqClient = factory.CreateClient(ClientName);
+    var qqClient = factory.CreateClient(clientName);
     switch (cmdType)
     {
         case CommandType.SexPicture:
             //发送涩图
-            var img = GetRandomPic(cache, request.Group_id.ToString());
+            var img = await GetRandomPic(cache, request.Group_id.ToString());
             await SendMsg(qqClient, $"/send_group_msg?access_token={secret}", new
             {
                 group_id = request.Group_id,
@@ -94,21 +99,21 @@ async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactor
             });
             break;
         default://发送请求到chatGPT
-            var cacheKey = $"{ChatGPTCachePrefix}_{request.User_id}";
+            var cacheKey = $"{chatGptCachePrefix}_{request.User_id}";
             if (cmd == "quitGPT")
             {
                 cache.Remove(cacheKey);
                 break;
             }
 
-            var history = cache.Get<List<string>>(cacheKey) ?? new List<string>();
+            var history = await cache.GetAsync<List<string>>(cacheKey) ?? new List<string>();
             var question = $"{string.Join(' ', history)}\nHuman: {cmd}";
-            var httpClient = factory.CreateClient(ChatGPTClientName);
+            var httpClient = factory.CreateClient(chatGptClientName);
             string? returnMsg;
             do
             {
                 var response = await GetCompletion(httpClient, question);
-                returnMsg = response!.Error != null ? response.Error.Message : response!.Choices?.FirstOrDefault()?.Text;
+                returnMsg = response!.Error is not null ? response.Error.Message : response.Choices?.FirstOrDefault()?.Text;
             } while (returnMsg == "broken");//无结果则继续提交 直到有结果为止
             _ = await SendMsg(qqClient, $"/send_group_msg?access_token={secret}", new
             {
@@ -118,7 +123,7 @@ async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactor
             });
             history.Add($"{cmd}{returnMsg}");
             if(history.Count>10) history.RemoveAt(0);
-            cache.Set(cacheKey, history);
+            await cache.SetAsync(cacheKey, history, TimeSpan.FromHours(2));//会话2小时内有效
             break;
     }
     return cmd;
@@ -126,11 +131,11 @@ async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactor
 
 const string imagePath = "images";
 const string setuCacheKey = "setu";
-string GetRandomPic(IMemoryCache cache, string postfix)
+async Task<string> GetRandomPic(IDistributedCache cache, string postfix)
 {
     var p = Path.GetFullPath(imagePath);
     var cacheKey = $"{setuCacheKey}_{postfix}";
-    var files = cache.GetOrCreate(cacheKey, s =>
+    var files = await cache.GetOrAddAsync(cacheKey, () =>
     {
         var setuPath = Path.Combine(p, "setu");
         if (!Directory.Exists(setuPath))
@@ -151,11 +156,11 @@ string GetRandomPic(IMemoryCache cache, string postfix)
     files.RemoveAt(index);
     if(files.Count > 0)
     {
-        cache.Set(cacheKey, files);
+        await cache.SetAsync(cacheKey, files);
     }
     else
     {
-        cache.Remove(cacheKey);
+        await cache.RemoveAsync(cacheKey);
     }
     return result;
 }
@@ -171,7 +176,7 @@ async Task<bool> SendMsg(HttpClient client, string url, object body)
 async Task<Response?> GetCompletion(HttpClient client, string prompt)
 {
     var r = await client.PostAsJsonAsync("/v1/completions", new Request { Prompt = prompt });
-    return await r.Content.ReadFromJsonAsync<Response>(serializerOptions);
+    return await r.Content.ReadFromJsonAsync<Response>(RedisExtension.JsonSerializerOptions);
 }
 
 /// <summary>

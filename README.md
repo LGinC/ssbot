@@ -12,10 +12,19 @@
 
 `-v $PWD/setu:/app/images/setu` 是把宿主机当前目录下的setu目录映射到容器的/app/images/setu， 可以把$PWD/setu替换为你自己的涩图所在的目录
 
-环境变量Cqhttp__Host是go-cqhttp服务的url，Cqhttp__secret是发送消息所需要的access_token，请自行替换
+| 环境变量 | 作用                                  | 示例值                        |
+|------|-------------------------------------|----------------------------|
+| Cqhttp__Host | cqhttp的服务器地址                        | http://192.168.1.100:6700  |
+| Cqhttp__secret | cqhttp的配置中的access-token             | xxxx                       |
+| Cqhttp__filter | 需要过滤的命令列表，只要输入的消息在列表内则不做处理，用英文逗号做分割 | 美图,谁在线 |
+| ConnectionStrings__redis | redis连接串 | 192.168.1.100,password=123123,connectTimeout=5000,writeBuffer=40960 |
+| ChatGPT__ApiKey | chatGPT中申请的apikey | xxxx |
+| ChatGPT__Proxy | 发送请求到chatGPT使用的代理，可不加 | http://192.168.1.100:7890 |
+
+使用redis缓存图片列表，避免发送重复的图片(不同的群使用不同的key)
+同时也会缓存不同用户发送到chatGPT的消息和结果(只会保留最近10条，缓存2h)，以保证chatGPT能够联系上下文回答
 
 # 修改cqhttp配置
-
 ## 修改post上传url
 在[cqhttp配置](https://docs.go-cqhttp.org/guide/config.html#%E9%85%8D%E7%BD%AE%E4%BF%A1%E6%81%AF)中有关于post url的配置
 ![image](https://user-images.githubusercontent.com/15363011/192493254-fba159a7-f721-47d3-bc5f-4e5fef3d706d.png)
@@ -41,5 +50,6 @@ filter.json里增加对！！的过滤  \uFF01就是！的unicode
 # 路线图
 + [x] 发送涩图
 + [x] 识别涩图命令
++ [x] 发送请求到chatGPT(目前仅为GPT-3的api，免费额度$18)
 + [ ] 将cqhttp上报场景抽象为接口，实现对应接口则会自动调用相应的实现类
 + [ ] 分离命令类型识别和对应命令处理方法
