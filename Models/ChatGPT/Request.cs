@@ -8,14 +8,12 @@
         /// <summary>
         /// 
         /// </summary>
-        public string Model { get; set; } = "text-davinci-003";
+        public string Model { get; set; } = "gpt-3.5-turbo";
 
         /// <summary>
-        /// 指令 即输入的信息
+        /// 消息列表
         /// </summary>
-#pragma warning disable CS8618 // 在退出构造函数时，不可为 null 的字段必须包含非 null 值。请考虑声明为可以为 null。
-        public string Prompt { get; set; }
-#pragma warning restore CS8618 // 在退出构造函数时，不可为 null 的字段必须包含非 null 值。请考虑声明为可以为 null。
+        public List<CompletionMessage>? Messages { get; set; }
 
         /// <summary>
         /// 模型上下文长度
@@ -44,18 +42,28 @@
         public bool Stream { get; set; }
 
         /// <summary>
-        /// 
+        /// -2.0 到 2.0 之间 如果是正数会分析新token，根据它到目前为止是否出现在文本中，在后续的新主题时增加模型的可能性
         /// </summary>
-        public int? Logprobs { get; set; }
+        public double? Presence_penalty { get; set; }
 
         /// <summary>
-        /// 是否在结果中增加输入的指令
+        /// -2.0 到 2.0 之间 如果为正数则分析新token，根据它在文本中出现的频率，以降低模型出现重复语句的可能
         /// </summary>
-        public bool? Echo { get; set; }
+        public bool? Frequency_penalty { get; set; }
 
         /// <summary>
         /// 
         /// </summary>
         public string[]? Stop { get; set; }
+
+        /// <summary>
+        /// 修改指定token在对话中出现的可能性 -100到100
+        /// </summary>
+        public Dictionary<string,int>? Logit_bias { get; set; }
+
+        /// <summary>
+        /// 终端用户的唯一标识
+        /// </summary>
+        public string? User { get; set; }
     }
 }

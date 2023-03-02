@@ -6,19 +6,15 @@
     public class Choice
     {
         /// <summary>
-        /// 文本
+        /// 消息列表
         /// </summary>
-        public string? Text { get; set; }
+        public  CompletionMessage? Message { get; set; }
         /// <summary>
         /// 索引
         /// </summary>
-        public int Index { get; set; }
+        public int? Index { get; set; }
         /// <summary>
-        /// 
-        /// </summary>
-        public int? Logprobs { get; set; }
-        /// <summary>
-        /// 
+        /// 完成原因
         /// </summary>
         public string? Finish_reason { get; set; }
     }

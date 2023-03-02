@@ -38,6 +38,21 @@ if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
+    app.MapGet("/test", async (string msg, IHttpClientFactory factory, IDistributedCache cache) =>
+    {
+        var cacheKey = "testChat";
+        var history = await cache.GetAsync<List<CompletionMessage>>(cacheKey) ?? new List<CompletionMessage>
+            { new CompletionMessage("system", "You are a helpful assistant.") };
+        history.Add(new CompletionMessage(msg));
+        var httpClient = factory.CreateClient(chatGptClientName);
+        var response = await GetCompletion(httpClient, history, "123");
+        var returnMsg = response!.Error is not null ? response.Error.Message : response.Choices?.FirstOrDefault()?.Message?.Content;
+        if (response?.Choices?.FirstOrDefault()?.Message?.Content == null) return response;
+        history.Add(new CompletionMessage(response.Choices.First().Message!.Role, returnMsg));
+        if (history.Count > 10) history.RemoveAt(0);
+        await cache.SetAsync(cacheKey, history, TimeSpan.FromMinutes(10));
+        return response;
+    });
 }
 
 app.MapPost("/recv", async (HttpRequest request, IHttpClientFactory factory, IDistributedCache cache) =>
@@ -106,22 +121,19 @@ async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactor
                 break;
             }
 
-            var history = await cache.GetAsync<List<string>>(cacheKey) ?? new List<string>();
-            var question = $"{string.Join(' ', history)}\nHuman: {cmd}";
+            var history = await cache.GetAsync<List<CompletionMessage>>(cacheKey) ?? new List<CompletionMessage>{new CompletionMessage("system", "You are a helpful assistant.")};
+            history.Add(new CompletionMessage(msg));
             var httpClient = factory.CreateClient(chatGptClientName);
-            string? returnMsg;
-            do
-            {
-                var response = await GetCompletion(httpClient, question);
-                returnMsg = response!.Error is not null ? response.Error.Message : response.Choices?.FirstOrDefault()?.Text;
-            } while (returnMsg == "broken");//无结果则继续提交 直到有结果为止
+            var response = await GetCompletion(httpClient, history, request.User_id.ToString());
+            var returnMsg = response!.Error is not null ? response.Error.Message : response.Choices?.FirstOrDefault()?.Message?.Content;
             _ = await SendMsg(qqClient, $"/send_group_msg?access_token={secret}", new
             {
                 group_id = request.Group_id,
                 message = returnMsg?.TrimStart(),
                 auto_escape = true,
             });
-            history.Add($"{cmd}{returnMsg}");
+            if (response?.Choices?.FirstOrDefault()?.Message?.Content == null) break;
+            history.Add(new CompletionMessage(response.Choices.First().Message!.Role, returnMsg));
             if(history.Count>10) history.RemoveAt(0);
             await cache.SetAsync(cacheKey, history, TimeSpan.FromHours(2));//会话2小时内有效
             break;
@@ -173,9 +185,10 @@ async Task<bool> SendMsg(HttpClient client, string url, object body)
     return false;
 }
 
-async Task<Response?> GetCompletion(HttpClient client, string prompt)
+async Task<Response?> GetCompletion(HttpClient client, List<CompletionMessage> messages, string uid)
 {
-    var r = await client.PostAsJsonAsync("/v1/completions", new Request { Prompt = prompt });
+    var r = await client.PostAsJsonAsync("v1/chat/completions", new Request { Messages = messages, User = uid}, RedisExtension.JsonSerializerOptions);
+    // Console.WriteLine(await r.Content.ReadAsStringAsync());
     return await r.Content.ReadFromJsonAsync<Response>(RedisExtension.JsonSerializerOptions);
 }
 
