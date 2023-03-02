@@ -49,7 +49,7 @@ if (app.Environment.IsDevelopment())
         var returnMsg = response!.Error is not null ? response.Error.Message : response.Choices?.FirstOrDefault()?.Message?.Content;
         if (response?.Choices?.FirstOrDefault()?.Message?.Content == null) return response;
         history.Add(new CompletionMessage(response.Choices.First().Message!.Role, returnMsg));
-        if (history.Count > 10) history.RemoveAt(0);
+        if (history.Count > 10) history.RemoveAt(1);
         await cache.SetAsync(cacheKey, history, TimeSpan.FromMinutes(10));
         return response;
     });
@@ -134,7 +134,7 @@ async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactor
             });
             if (response?.Choices?.FirstOrDefault()?.Message?.Content == null) break;
             history.Add(new CompletionMessage(response.Choices.First().Message!.Role, returnMsg));
-            if(history.Count>10) history.RemoveAt(0);
+            if(history.Count>10) history.RemoveAt(1);//保留第一条 system的信息
             await cache.SetAsync(cacheKey, history, TimeSpan.FromHours(2));//会话2小时内有效
             break;
     }
