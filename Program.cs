@@ -137,6 +137,7 @@ async Task<string> GroupMessage(CqhttpGroupMsgRequest request, IHttpClientFactor
                 auto_escape = true,
             });
             if (response?.Choices?.FirstOrDefault()?.Message?.Content == null) break;
+            if (msg.Length > 300 || returnMsg is null || returnMsg.Length > 300) break;
             history.Add(new CompletionMessage(response.Choices.First().Message!.Role, returnMsg));
             if(history.Count>10) history.RemoveAt(1);//保留第一条 system的信息
             await cache.SetAsync(cacheKey, history, TimeSpan.FromHours(2));//会话2小时内有效
