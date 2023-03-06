@@ -27,7 +27,11 @@ builder.Services.AddHttpClient(chatGptClientName, options =>
     options.BaseAddress = new Uri(builder.Configuration["ChatGPT:Host"]?? string.Empty);
     options.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0");
     options.DefaultRequestHeaders.Add("Authorization", $"Bearer {builder.Configuration["ChatGPT:ApiKey"]}");
-}).ConfigurePrimaryHttpMessageHandler(_ => new HttpClientHandler { Proxy = string.IsNullOrWhiteSpace(builder.Configuration["ChatGPT:Proxy"]) ? null : new WebProxy(), ServerCertificateCustomValidationCallback = (_,_,_,_)=> true });
+}).ConfigurePrimaryHttpMessageHandler(_ => new HttpClientHandler
+{
+    ServerCertificateCustomValidationCallback = (_,_,_,_)=> true,
+    Proxy = string.IsNullOrWhiteSpace(builder.Configuration["ChatGPT:Proxy"]) ? null : new WebProxy(builder.Configuration["ChatGPT:Proxy"]), 
+});
 var secret = builder.Configuration["Cqhttp:secret"];
 var filterKeywords = builder.Configuration["Cqhttp:filter"]?.Split(',');
 builder.Services.AddSingleton<IHttpContextAccessor, HttpContextAccessor>();
@@ -43,7 +47,7 @@ if (app.Environment.IsDevelopment())
         var cacheKey = "testChat";
         var history = await cache.GetAsync<List<CompletionMessage>>(cacheKey) ?? new List<CompletionMessage>
             { new CompletionMessage("system", "You are a helpful assistant.") };
-        history.Add(new CompletionMessage(msg));
+        history.Add(new CompletionMessage("user", msg));
         var httpClient = factory.CreateClient(chatGptClientName);
         var response = await GetCompletion(httpClient, history, "123");
         var returnMsg = response!.Error is not null ? response.Error.Message : response.Choices?.FirstOrDefault()?.Message?.Content;
