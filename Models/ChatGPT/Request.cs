@@ -8,7 +8,7 @@
         /// <summary>
         /// 
         /// </summary>
-        public string Model { get; set; } = "gpt-3.5-turbo";
+        public string Model { get; set; } = "gpt-3.5-turbo-0301";
 
         /// <summary>
         /// 消息列表

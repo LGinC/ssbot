@@ -19,6 +19,12 @@ public static class RedisExtension
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
     
+    static RedisExtension()
+    {
+        JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter());
+    }
+    
+    
     /// <summary>
     /// 获取指定key的缓存，找不到则返回null
     /// </summary>
